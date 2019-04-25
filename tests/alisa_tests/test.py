@@ -3,59 +3,56 @@ from nussl import AudioSignal, DeepClustering, jupyter_utils, efz_utils
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
-from nussl.evaluation import BSSEvalV4
-import json
-import numpy as np
 import itertools
 import pandas as pd
 import musdb
+from nussl.evaluation import BSSEvalV4
 
 
 def main():
+    matplotlib.use('Agg')
+    # create_music_pairs()
     music_measures = get_music_measures()
-    # matplotlib.use('Agg')
-    # create_urban_mixtures()
-    # measures_urban = get_urban_measures()
-    create_plots(music_measures)
+    # create_urban_pairs()
+    # urban_measures = get_urban_measures()
+    measures = {'music': music_measures} #, 'urban': urban_measures, 'vocal': vocal_measures}
+    create_plots(measures)
 
 
-def create_plots(measures):
+def create_plots(scores_dict):
     # create boxplot of conf measures
-    # alpha = [row[0] for row in measures]
-    # plt.boxplot(alpha)
-    # ax.set_xticklabels(('music', 'urban'))
-    # plt.savefig('figures/boxplot')
+    if len(scores_dict.keys()) >= 2:
+        data = []
+        for key in scores_dict:
+            alpha = [row[0] for row in scores_dict[key]]
+            data.append(alpha)
+        fig, ax = plt.subplots()
+        ax.boxplot(data)
+        ax.set_xticklabels(scores_dict.keys())
+        plt.savefig('figures/boxplot')
 
-    plt.scatter([row[0] for row in measures], [row[1] for row in measures])
-    plt.title('Confidence measure versus SDR for urban sound mixtures')
-    plt.xlabel('Confidence measure')
-    plt.ylabel('SDR')
-    plt.savefig('figures/scatter')
+    for key in scores_dict:
+        plt.scatter([row[0] for row in scores_dict[key]], [row[1] for row in scores_dict[key]])
+        plt.title('Confidence measure versus SDR for ' + key + ' mixtures')
+        plt.xlabel('Confidence measure')
+        plt.ylabel('SDR')
+        plt.savefig('figures/' + key + '_scatter')
 
 
 def get_music_measures(model='music'):
-    mus = musdb.DB(root_dir='mixtures/musdb18')
-    tracks = mus.load_mus_tracks()
+    path = 'mixtures/musdb'
+    scores = []
 
-    measures = []
     if model == 'music':
         model_path = efz_utils.download_trained_model('vocals_44k_coherent.pth')
     elif model == 'vocals':
         model_path = efz_utils.download_trained_model('speech_wsj8k.pth')
 
-    mixture_ct = 10
-    idx = 0
+    titles = set([file[:-7] for file in os.listdir(path + '/paired_sources')])
 
-    for track in tracks:
-        print(track)
-        s0 = AudioSignal(audio_data_array=track.targets['vocals'].audio)
-        s1 = AudioSignal(audio_data_array=track.targets['accompaniment'].audio) \
-             + AudioSignal(audio_data_array=track.targets['drums'].audio) \
-             + AudioSignal(audio_data_array=track.targets['bass'].audio) \
-             + AudioSignal(audio_data_array=track.targets['other'].audio)
-        s0.write_audio_to_file('mixtures/musdb/paired_sources/' + track + '_s0.wav')
-        s1.write_audio_to_file('mixtures/musdb/paired_sources' + track + '_s1.wav')
-
+    for title in titles:
+        s0 = AudioSignal(path + '/paired_sources/' + title + '_s0.wav')
+        s1 = AudioSignal(path + '/paired_sources/' + title + '_s1.wav')
         sources = [s0, s1]
         mixture = sources[0] + sources[1]
 
@@ -69,22 +66,51 @@ def get_music_measures(model='music'):
 
         separator.run()
         estimates = separator.make_audio_signals()
-        save_estimates(estimates, 'estimates/musdb/' + str(idx))
+
+        # not sure why this happens sometimes
+        if np.all(estimates[0].audio_data == 0) or np.all(estimates[1].audio_data == 0)\
+                or np.all(sources[0].audio_data == 0) or np.all(sources[1].audio_data == 0):
+            continue
+
+        save_estimates(estimates, 'estimates/musdb/' + title)
 
         sdr = get_sdr(sources, estimates)
         alpha = get_alpha(separator.confidence.flatten())
+        scores.append((alpha, sdr))
+
+    return scores
+
+
+def create_music_pairs():
+    mus = musdb.DB(root_dir='mixtures/musdb')
+    tracks = mus.load_mus_tracks()
+
+    mixture_ct = 10
+    idx = 0
+
+    for track in tracks:
+        print(track)
+        duration = range(20*track.rate, 30*track.rate)
+        s0 = AudioSignal(audio_data_array=track.targets['vocals'].audio[duration])
+        s1 = AudioSignal(audio_data_array=track.targets['accompaniment'].audio[duration]) \
+             + AudioSignal(audio_data_array=track.targets['drums'].audio[duration]) \
+             + AudioSignal(audio_data_array=track.targets['bass'].audio[duration]) \
+             + AudioSignal(audio_data_array=track.targets['other'].audio[duration])
+        s0.write_audio_to_file('mixtures/musdb/paired_sources/' + track.name + '_s0.wav')
+        s1.write_audio_to_file('mixtures/musdb/paired_sources/' + track.name + '_s1.wav')
+        s0.path_to_input_file = 'mixtures/musdb/paired_sources/' + track.name + '_s0.wav'
+        s1.path_to_input_file = 'mixtures/musdb/paired_sources/' + track.name + '_s1.wav'
 
         idx += 1
         if idx > mixture_ct:
             break
 
 
-
 def get_urban_measures(model='music'):
     # returns an n x 2 array where rows are mixtures, and columns are alpha and SDR
     path = 'mixtures/UrbanSound8K'
 
-    measures = []
+    scores = []
     if model == 'music':
         model_path = efz_utils.download_trained_model('vocals_44k_coherent.pth')
     elif model == 'vocals':
@@ -112,12 +138,59 @@ def get_urban_measures(model='music'):
 
         sdr = get_sdr(sources, estimates)
         alpha = get_alpha(separator.confidence.flatten())
-        measures.append((alpha, sdr))
+        scores.append((alpha, sdr))
 
-    return measures
+    return scores
 
 
-def create_urban_mixtures():
+def save_estimates(estimates, path):
+    for i, e in enumerate(estimates):
+        e.write_audio_to_file(path + '_' + f'est{i}.wav')
+
+
+def mixture_plots(separator, mixture_title):
+    # plots for a particular mixture separation
+
+    # embedding plots and spectrograms
+    plt.figure(figsize=(30, 15))
+    separator.plot()
+    plt.tight_layout()
+    plt.savefig('figures/' + mixture_title + '_fig')
+
+    # plot histogram of confidence measure
+    plt.figure(figsize=(20,20))
+    plt.hist(separator.confidence.flatten(), facecolor='gray')
+    plt.ylim((0, 400000))
+    plt.title('Confidence measure')
+    plt.savefig('figures/' + mixture_title + '_hst')
+
+
+def get_sdr(sources, estimates, type=1):
+    # type 1: higher of mean SDR score for each estimate
+
+    orderings = list(itertools.permutations(estimates))     # all possible ordering of estimates (there are 2)
+
+    scores = []         # contains SDR for two possible orderings
+    for _estimates in orderings:
+        evaluator = BSSEvalV4(sources, list(_estimates), compute_permutation=False, win=2.0, hop=1.5)
+        _scores = evaluator.evaluate()
+        scores.append(_scores)
+
+    best_score_index = np.argmax([np.nanmean(x['raw_values']['SDR']) for x in scores])
+    best_score = scores[best_score_index]
+    sdr = [np.round(np.nanmean(best_score['raw_values']['SDR'][0]), 3),
+           np.round(np.nanmean(best_score['raw_values']['SDR'][1]), 3)]
+
+    if type == 1:
+        return sdr[0]
+
+
+def get_alpha(alphas, type='mean'):
+    if type == 'mean':
+        return np.nanmean(alphas)
+
+
+def create_urban_pairs():
     file_path = 'sources/UrbanSound8K/'
     df = pd.read_csv(file_path + 'metadata/UrbanSound8K.csv', header=0)
     fold1 = df.loc[df['fold'] == 1]             # keep only rows for fold 1
@@ -167,53 +240,6 @@ def create_my_mixtures():
             vocal_instrumental_mixtures.append([vocal, instrumental])
 
     return vocal_instrumental_mixtures
-
-
-def save_estimates(estimates, path):
-    for i, e in enumerate(estimates):
-        e.write_audio_to_file(path + '_' + f'est{i}.wav')
-
-
-def get_sdr(sources, estimates, type=1):
-    # type 1: higher of mean SDR score for each estimate
-
-    orderings = list(itertools.permutations(estimates))     # all possible ordering of estimates (there are 2)
-
-    scores = []         # contains SDR for two possible orderings
-    for _estimates in orderings:
-        evaluator = BSSEvalV4(sources, list(_estimates), compute_permutation=False, win=2.0, hop=1.5)
-        _scores = evaluator.evaluate()
-        scores.append(_scores)
-
-    best_score_index = np.argmax([np.nanmean(x['raw_values']['SDR']) for x in scores])
-    best_score = scores[best_score_index]
-    sdr = [np.round(np.nanmean(best_score['raw_values']['SDR'][0]), 3),
-           np.round(np.nanmean(best_score['raw_values']['SDR'][1]), 3)]
-
-    if type == 1:
-        return sdr[0]
-
-
-def get_alpha(alphas, type='mean'):
-    if type == 'mean':
-        return np.nanmean(alphas)
-
-
-def mixture_plots(separator, mixture_title):
-    # plots for a particular mixture separation
-
-    # embedding plots and spectrograms
-    plt.figure(figsize=(30, 15))
-    separator.plot()
-    plt.tight_layout()
-    plt.savefig('figures/' + mixture_title + '_fig')
-
-    # plot histogram of confidence measure
-    plt.figure(figsize=(20,20))
-    plt.hist(separator.confidence.flatten(), facecolor='gray')
-    plt.ylim((0, 400000))
-    plt.title('Confidence measure')
-    plt.savefig('figures/' + mixture_title + '_hst')
 
 
 if __name__ == '__main__':
