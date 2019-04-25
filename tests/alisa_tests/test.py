@@ -7,15 +7,19 @@ import itertools
 import pandas as pd
 import musdb
 from nussl.evaluation import BSSEvalV4
+from scipy import signal
 
 
 def main():
     matplotlib.use('Agg')
     # create_music_pairs()
-    music_measures = get_music_measures()
     # create_urban_pairs()
-    # urban_measures = get_urban_measures()
-    measures = {'music': music_measures} #, 'urban': urban_measures, 'vocal': vocal_measures}
+    # create_voice_pairs()
+
+    music_measures = calculate_measures(data='music', model='music')
+    urban_measures = calculate_measures(data='urban', model='music')
+    # voice_measures = calculate_measures(data='voice', model='music')
+    measures = {'music': music_measures, 'urban': urban_measures}#, 'vocal': voice_measures}
     create_plots(measures)
 
 
@@ -32,6 +36,7 @@ def create_plots(scores_dict):
         plt.savefig('figures/boxplot')
 
     for key in scores_dict:
+        plt.figure()
         plt.scatter([row[0] for row in scores_dict[key]], [row[1] for row in scores_dict[key]])
         plt.title('Confidence measure versus SDR for ' + key + ' mixtures')
         plt.xlabel('Confidence measure')
@@ -39,15 +44,20 @@ def create_plots(scores_dict):
         plt.savefig('figures/' + key + '_scatter')
 
 
-def get_music_measures(model='music'):
-    path = 'mixtures/musdb'
-    scores = []
+def calculate_measures(data='music', model='music'):
+    if data == 'music':
+        path = 'mixtures/musdb'
+    elif data == 'voice':
+        path = 'mixtures/voice'
+    elif data == 'urban':
+        path = 'mixtures/UrbanSound8K'
 
     if model == 'music':
         model_path = efz_utils.download_trained_model('vocals_44k_coherent.pth')
     elif model == 'vocals':
         model_path = efz_utils.download_trained_model('speech_wsj8k.pth')
 
+    scores = []
     titles = set([file[:-7] for file in os.listdir(path + '/paired_sources')])
 
     for title in titles:
@@ -67,74 +77,7 @@ def get_music_measures(model='music'):
         separator.run()
         estimates = separator.make_audio_signals()
 
-        # not sure why this happens sometimes
-        if np.all(estimates[0].audio_data == 0) or np.all(estimates[1].audio_data == 0)\
-                or np.all(sources[0].audio_data == 0) or np.all(sources[1].audio_data == 0):
-            continue
-
-        save_estimates(estimates, 'estimates/musdb/' + title)
-
-        sdr = get_sdr(sources, estimates)
-        alpha = get_alpha(separator.confidence.flatten())
-        scores.append((alpha, sdr))
-
-    return scores
-
-
-def create_music_pairs():
-    mus = musdb.DB(root_dir='mixtures/musdb')
-    tracks = mus.load_mus_tracks()
-
-    mixture_ct = 10
-    idx = 0
-
-    for track in tracks:
-        print(track)
-        duration = range(20*track.rate, 30*track.rate)
-        s0 = AudioSignal(audio_data_array=track.targets['vocals'].audio[duration])
-        s1 = AudioSignal(audio_data_array=track.targets['accompaniment'].audio[duration]) \
-             + AudioSignal(audio_data_array=track.targets['drums'].audio[duration]) \
-             + AudioSignal(audio_data_array=track.targets['bass'].audio[duration]) \
-             + AudioSignal(audio_data_array=track.targets['other'].audio[duration])
-        s0.write_audio_to_file('mixtures/musdb/paired_sources/' + track.name + '_s0.wav')
-        s1.write_audio_to_file('mixtures/musdb/paired_sources/' + track.name + '_s1.wav')
-        s0.path_to_input_file = 'mixtures/musdb/paired_sources/' + track.name + '_s0.wav'
-        s1.path_to_input_file = 'mixtures/musdb/paired_sources/' + track.name + '_s1.wav'
-
-        idx += 1
-        if idx > mixture_ct:
-            break
-
-
-def get_urban_measures(model='music'):
-    # returns an n x 2 array where rows are mixtures, and columns are alpha and SDR
-    path = 'mixtures/UrbanSound8K'
-
-    scores = []
-    if model == 'music':
-        model_path = efz_utils.download_trained_model('vocals_44k_coherent.pth')
-    elif model == 'vocals':
-        model_path = efz_utils.download_trained_model('speech_wsj8k.pth')
-
-    for i in range(int(len(os.listdir(path + '/paired_sources'))/2)):
-        s0 = AudioSignal(path + '/paired_sources/' + str(i) + '_s0.wav')
-        s1 = AudioSignal(path + '/paired_sources/' + str(i) + '_s1.wav')
-        sources = [s0, s1]
-
-        mixture = sources[0] + sources[1]
-        mixture.write_audio_to_file(path + '/' + str(i) + '_mixture.wav')
-
-        separator = DeepClustering(
-            mixture,
-            model_path=model_path,
-            num_sources=2,
-            percentile=0,
-            clustering_type='kmeans',
-        )
-
-        separator.run()
-        estimates = separator.make_audio_signals()
-        save_estimates(estimates, 'estimates/UrbanSound8K/' + str(i))
+        # save_estimates(estimates, 'estimates/musdb/' + title)
 
         sdr = get_sdr(sources, estimates)
         alpha = get_alpha(separator.confidence.flatten())
@@ -165,12 +108,11 @@ def mixture_plots(separator, mixture_title):
     plt.savefig('figures/' + mixture_title + '_hst')
 
 
-def get_sdr(sources, estimates, type=1):
-    # type 1: higher of mean SDR score for each estimate
-
+def get_sdr(sources, estimates):
+    # higher of mean SDR score for each estimate
     orderings = list(itertools.permutations(estimates))     # all possible ordering of estimates (there are 2)
 
-    scores = []         # contains SDR for two possible orderings
+    scores = []     # contains SDR for two possible orderings
     for _estimates in orderings:
         evaluator = BSSEvalV4(sources, list(_estimates), compute_permutation=False, win=2.0, hop=1.5)
         _scores = evaluator.evaluate()
@@ -181,13 +123,37 @@ def get_sdr(sources, estimates, type=1):
     sdr = [np.round(np.nanmean(best_score['raw_values']['SDR'][0]), 3),
            np.round(np.nanmean(best_score['raw_values']['SDR'][1]), 3)]
 
-    if type == 1:
-        return sdr[0]
+    return sdr[0]
 
 
-def get_alpha(alphas, type='mean'):
-    if type == 'mean':
+def get_alpha(alphas, weighted=False, mixture=None):
+    if weighted is False:
         return np.nanmean(alphas)
+    else:
+        magnitude_spectrogram = np.abs(signal.stft(mixture.audio_data))
+        weights = magnitude_weights(magnitude_spectrogram).flatten()
+        return np.average(alphas, weights=weights)
+
+
+def magnitude_weights(magnitude_spectrogram):
+    weights = magnitude_spectrogram / (np.sum(magnitude_spectrogram) + 1e-6)
+    weights *= (magnitude_spectrogram.shape[0] * magnitude_spectrogram.shape[1])
+    return np.log10(weights + 1.0)
+
+
+def create_voice_pairs():
+    path = 'sources/voice/'
+    titles = [title for title in os.listdir(path)]
+
+    for pair in itertools.combinations(titles, 2):
+        # convert each source to mono
+        source0 = AudioSignal(path + pair[0], sample_rate=44100, offset=20, duration=10).to_mono(overwrite=True)
+        source1 = AudioSignal(path + pair[1], sample_rate=44100, offset=20, duration=10).to_mono(overwrite=True)
+        # write to file and update path
+        source0.write_audio_to_file('mixtures/voice/paired_sources/' + pair[0] + '_' + pair[1] + '_s0.wav')
+        source0.path_to_input_file = 'mixtures/voice/paired_sources/' + pair[0] + '_' + pair[1] + '_s0.wav'
+        source1.write_audio_to_file('mixtures/voice/paired_sources/' + pair[0] + '_' + pair[1] + '_s1.wav')
+        source1.path_to_input_file = 'mixtures/voice/paired_sources/' + pair[0] + '_' + pair[1] + '_s1.wav'
 
 
 def create_urban_pairs():
@@ -217,6 +183,31 @@ def create_urban_pairs():
         # write to file
         source0.write_audio_to_file('mixtures/UrbanSound8K/paired_sources/' + str(idx) + '_s0.wav')
         source1.write_audio_to_file('mixtures/UrbanSound8K/paired_sources/' + str(idx) + '_s1.wav')
+
+        idx += 1
+        if idx > mixture_ct:
+            break
+
+
+def create_music_pairs():
+    mus = musdb.DB(root_dir='mixtures/musdb')
+    tracks = mus.load_mus_tracks()
+
+    mixture_ct = 10
+    idx = 0
+
+    for track in tracks:
+        print(track)
+        duration = range(20*track.rate, 30*track.rate)
+        s0 = AudioSignal(audio_data_array=track.targets['vocals'].audio[duration])
+        s1 = AudioSignal(audio_data_array=track.targets['accompaniment'].audio[duration]) \
+             + AudioSignal(audio_data_array=track.targets['drums'].audio[duration]) \
+             + AudioSignal(audio_data_array=track.targets['bass'].audio[duration]) \
+             + AudioSignal(audio_data_array=track.targets['other'].audio[duration])
+        s0.write_audio_to_file('mixtures/musdb/paired_sources/' + track.name + '_s0.wav')
+        s1.write_audio_to_file('mixtures/musdb/paired_sources/' + track.name + '_s1.wav')
+        s0.path_to_input_file = 'mixtures/musdb/paired_sources/' + track.name + '_s0.wav'
+        s1.path_to_input_file = 'mixtures/musdb/paired_sources/' + track.name + '_s1.wav'
 
         idx += 1
         if idx > mixture_ct:
